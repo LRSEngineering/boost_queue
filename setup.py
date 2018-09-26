@@ -4,8 +4,9 @@ from setuptools import Extension
 mod = Extension(
         'boost_queue',
         sources=['boost_queue.cpp'],
-        libraries=['boost_thread', 'boost_date_time'],
+        libraries=['boost_thread', 'boost_date_time', 'boost_system', 'rt'],
         extra_compile_args=["-O2"],
+        extra_link_args=['-Wl,--exclude-libs', '-Wl,ALL', '-static-libgcc', '-Wl,-Bstatic', '-lstdc++', '-Wl,-Bdynamic', "-Wl,-rpath,$ORIGIN"]
         )
 
 setup(

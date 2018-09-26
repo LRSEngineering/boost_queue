@@ -507,12 +507,14 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
         return PyTuple_New(0);
     }
 
+#if 0
     if (items < 0) {
         return PyErr_Format(
                 PyExc_ValueError,
                 "items must be greater or equal 0 but it is: %ld",
                 items);
     }
+#endif
 
 
     if (self->maxsize > 0 and static_cast<size_t>(items) > self->maxsize) {
@@ -530,8 +532,11 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
         _wait_for_lock(lock);
     }
 
-    if (not _wait_for_items(self, block, timeout, lock, items)) {
+    if (not _wait_for_items(self, block, timeout, lock, items >= 0 ? items : 1)) {
         return NULL;
+    }
+    if (items < 0) {
+        items = self->bridge->queue.size();
     }
 
     if ((result_tuple = PyTuple_New(items)) == NULL) {
