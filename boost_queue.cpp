@@ -44,7 +44,7 @@ class AllowThreads {
 static const char *put_kwlist[] = {"item", "block", "timeout", NULL};
 static const char *put_many_kwlist[] = {"items", "block", "timeout", NULL};
 static const char *get_kwlist[] = {"block", "timeout", NULL};
-static const char *get_many_kwlist[] = {"items", "block", "timeout", NULL};
+static const char *get_many_kwlist[] = {"items", "block", "timeout", "maxitems", NULL};
 
 
 static PyObject * EmptyError;
@@ -133,11 +133,13 @@ Queue_dealloc(Queue *self)
 
 
 static int
-_parse_block_and_timeout(
+_parse_block_and_timeout_and_maxitems(
         PyObject *py_block,
         PyObject *py_timeout,
+        PyObject *py_maxitems,
         bool & block,
-        double & timeout)
+        double & timeout,
+        long * maxitems)
 {
 
     if (py_block != NULL and PyObject_Not(py_block)) {
@@ -170,6 +172,25 @@ _parse_block_and_timeout(
             block = false;
         }
     }
+
+    if (py_maxitems != NULL and maxitems != NULL and py_maxitems != Py_None) {
+        *maxitems = PyLong_AsLong(py_maxitems);
+        if (PyErr_Occurred()) {
+            PyErr_Format(PyExc_ValueError, "'maxitems' is not a valid integer");
+            return -1;
+        }
+
+        if (*maxitems < 0) {
+            PyErr_Format(PyExc_ValueError, "'maxitems' must be positive");
+            return -1;
+        }
+
+        if (*maxitems > static_cast<long>(std::numeric_limits<time_t>::max())) {
+            PyErr_Format(PyExc_OverflowError, "maxitems is too large");
+            return -1;
+        }
+    }
+
     return 1;
 }
 
@@ -282,7 +303,7 @@ Queue_put(Queue *self, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    if (_parse_block_and_timeout(py_block, py_timeout, block, timeout) == -1) {
+    if (_parse_block_and_timeout_and_maxitems(py_block, py_timeout, NULL, block, timeout, NULL) == -1) {
         return NULL;
     }
     return _internal_put(self, item, block, timeout);
@@ -315,7 +336,7 @@ Queue_put_many(Queue *self, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    if (_parse_block_and_timeout(py_block, py_timeout, block, timeout) == -1) {
+    if (_parse_block_and_timeout_and_maxitems(py_block, py_timeout, NULL, block, timeout, NULL) == -1) {
         return NULL;
     }
 
@@ -469,7 +490,7 @@ Queue_get(Queue *self, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    if (_parse_block_and_timeout(py_block, py_timeout, block, timeout) == -1) {
+    if (_parse_block_and_timeout_and_maxitems(py_block, py_timeout, NULL, block, timeout, NULL) == -1) {
         return NULL;
     }
     return _internal_get(self, block, timeout);
@@ -481,25 +502,28 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
 
     PyObject *py_block=NULL;
     PyObject *py_timeout=NULL;
+    PyObject *py_maxitems=NULL;
     PyObject *result_tuple=NULL;
 
     bool block=true;
     double timeout = 0;
-    long int items=0;
+    long int maxitems = 0;
+    long int items = 0;
 
     if(not PyArg_ParseTupleAndKeywords(
                                 args,
                                 kwargs,
-                                "l|OO:get",
+                                "l|OOO:get",
                                 const_cast<char**>(get_many_kwlist),
                                 &items,
                                 &py_block,
-                                &py_timeout))
+                                &py_timeout,
+                                &py_maxitems))
     {
         return NULL;
     }
 
-    if (_parse_block_and_timeout(py_block, py_timeout, block, timeout) == -1) {
+    if (_parse_block_and_timeout_and_maxitems(py_block, py_timeout, py_maxitems, block, timeout, &maxitems) == -1) {
         return NULL;
     }
 
@@ -516,6 +540,9 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
     }
 #endif
 
+    if (items < 0) {
+        items = self->bridge->queue.size();
+    }
 
     if (self->maxsize > 0 and static_cast<size_t>(items) > self->maxsize) {
         return PyErr_Format(
@@ -535,8 +562,10 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
     if (not _wait_for_items(self, block, timeout, lock, items >= 0 ? items : 1)) {
         return NULL;
     }
-    if (items < 0) {
-        items = self->bridge->queue.size();
+
+    if (maxitems != 0 and items > maxitems) {
+        // Max items supercedes item count passed
+        items = maxitems;
     }
 
     if ((result_tuple = PyTuple_New(items)) == NULL) {
