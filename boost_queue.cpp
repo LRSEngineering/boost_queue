@@ -447,7 +447,7 @@ _wait_for_items(
     }
     else {
         // Wait indefinitely...
-        while (self->bridge->queue.size() < items_len) {
+        while (self->bridge->queue.size() < static_cast<size_t>(items_len)) {
             _blocked_wait_empty(self->bridge, lock);
         }
     }
