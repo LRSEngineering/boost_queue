@@ -423,10 +423,10 @@ _wait_for_items(
     boost::uint64_t timeout_millis = static_cast<boost::uint64_t>(timeout*1000);
 
     if (items_len < 0) {
-        items_len = self->bridge->queue.size();
+        items_len = 1;
     }
 
-    if (items_len > 0 and self->bridge->queue.size() >= static_cast<size_t>(items_len)) {
+    if (self->bridge->queue.size() >= static_cast<size_t>(items_len)) {
         /* Fall through the end of method */
     }
     else if (not block) {
@@ -560,7 +560,7 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
         _wait_for_lock(lock);
     }
 
-    if (not _wait_for_items(self, block, timeout, lock, items > 0 ? items : 1)) {
+    if (not _wait_for_items(self, block, timeout, lock, items)) {
         return NULL;
     }
 
