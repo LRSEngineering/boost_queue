@@ -11,7 +11,7 @@ mod = Extension(
 
 setup(
     name='boost_queue',
-    version='0.5.5',
+    version='0.5.6',
     description="Queue using boost's locking API",
     long_description=open('README.rst').read(),
     classifiers=[
