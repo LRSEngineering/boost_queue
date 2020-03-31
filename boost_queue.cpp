@@ -540,11 +540,8 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
     }
 #endif
 
-    if (items < 0) {
-        items = self->bridge->queue.size();
-    }
 
-    if (self->maxsize > 0 and static_cast<size_t>(items) > self->maxsize) {
+    if (self->maxsize > 0 and items > static_cast<long>(self->maxsize)) {
         return PyErr_Format(
                 PyExc_ValueError,
                 "you want to get %ld but maxsize is %i",
@@ -561,6 +558,15 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
 
     if (not _wait_for_items(self, block, timeout, lock, items >= 0 ? items : 1)) {
         return NULL;
+    }
+
+    if (items < 0) {
+        items = self->bridge->queue.size();
+    }
+
+    if (self->maxsize > 0 and maxitems > self->maxsize) {
+        // Restrict maxitems to max size if larger
+        maxitems = self->maxsize;
     }
 
     if (maxitems != 0 and items > maxitems) {
