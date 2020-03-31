@@ -422,11 +422,11 @@ _wait_for_items(
 {
     boost::uint64_t timeout_millis = static_cast<boost::uint64_t>(timeout*1000);
 
-    if (items_len < 0) {
-        items_len = 1;
-    }
+    // if (items_len < 0) {
+    //     items_len = 1;
+    // }
 
-    if (self->bridge->queue.size() >= static_cast<size_t>(items_len)) {
+    if (items_len > 0 and self->bridge->queue.size() >= static_cast<size_t>(items_len)) {
         /* Fall through the end of method */
     }
     else if (not block) {
@@ -444,7 +444,7 @@ _wait_for_items(
         }
     }
     else {
-        while (not (self->bridge->queue.size() >= static_cast<size_t>(items_len))) {
+        while (not ((items_len < 0 and self->bridge->queue.size() > 0) or (self->bridge->queue.size() >= static_cast<size_t>(items_len)))) {
             _blocked_wait_empty(self->bridge, lock);
         }
     }

@@ -159,9 +159,9 @@ class TestQueue(TestCase):
         q.put_many((1, 2, 3))
         q.put_many((1, 2, 3))
 
-        self.assertEqual((1, 2), q.get_many(items=-1, maxitems=2))
-        self.assertEqual((3,), q.get_many(items=-1, maxitems=1))
-        self.assertEqual((1, 2, 3), q.get_many(items=-1, maxitems=3))
+        self.assertEqual((1, 2), q.get_many(-1, maxitems=2))
+        self.assertEqual((3,), q.get_many(-1, maxitems=1))
+        self.assertEqual((1, 2, 3), q.get_many(-1, maxitems=3))
 
     def test_get_many_not_enough_space(self):
         q = Queue(10)
