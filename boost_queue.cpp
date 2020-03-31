@@ -422,11 +422,13 @@ _wait_for_items(
 {
     boost::uint64_t timeout_millis = static_cast<boost::uint64_t>(timeout*1000);
 
-    // if (items_len < 0) {
-    //     items_len = 1;
-    // }
+    if (items_len < 0) {
+        // Anything negative means that we should grab any number of items
+        // that is available or in other words, at least 1.
+        items_len = 1;
+    }
 
-    if (items_len > 0 and self->bridge->queue.size() >= static_cast<size_t>(items_len)) {
+    if (self->bridge->queue.size() >= items_len) {
         /* Fall through the end of method */
     }
     else if (not block) {
@@ -436,7 +438,7 @@ _wait_for_items(
     else if (timeout > 0) {
         boost::system_time abs_timeout = boost::get_system_time();
         abs_timeout += boost::posix_time::milliseconds(timeout_millis);
-        while (self->bridge->queue.size() < items_len) {
+        while (self->bridge->queue.size() < static_cast<size_t>(items_len)) {
             if (not _timed_wait_empty(self->bridge, lock, abs_timeout)) {
                 PyErr_Format(EmptyError, "Queue Empty");
                 return false;
@@ -444,7 +446,8 @@ _wait_for_items(
         }
     }
     else {
-        while (not ((items_len < 0 and self->bridge->queue.size() > 0) or (self->bridge->queue.size() >= static_cast<size_t>(items_len)))) {
+        // Wait indefinitely...
+        while (self->bridge->queue.size() < items_len) {
             _blocked_wait_empty(self->bridge, lock);
         }
     }
@@ -565,6 +568,7 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
     }
 
     if (items < 0) {
+        // Negative items means we grab as many items as available.
         items = self->bridge->queue.size();
     }
 
@@ -573,8 +577,9 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
         maxitems = self->maxsize;
     }
 
-    if (maxitems != 0 and items > maxitems) {
-        // Max items supercedes item count passed
+    if (maxitems > 0 and items > maxitems) {
+        // Max items supercedes item count passed,
+        // so limit the item count.
         items = maxitems;
     }
 
