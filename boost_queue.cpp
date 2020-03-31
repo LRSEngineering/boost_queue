@@ -428,7 +428,7 @@ _wait_for_items(
         items_len = 1;
     }
 
-    if (self->bridge->queue.size() >= items_len) {
+    if (self->bridge->queue.size() >= static_cast<size_t>(items_len)) {
         /* Fall through the end of method */
     }
     else if (not block) {
