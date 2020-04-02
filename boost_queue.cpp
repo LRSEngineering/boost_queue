@@ -87,14 +87,14 @@ template <class Container> class Bridge {
 
 typedef struct {
     PyObject_HEAD
-    Bridge<std::deque<PyObject *>>*bridge;
+    Bridge< std::deque<PyObject *> > *bridge;
     size_t maxsize;
     boost::uint64_t unfinished_tasks;
 } Queue;
 
 typedef struct {
     PyObject_HEAD
-    Bridge<ExposedPriorityQueue<PyObject *>>*bridge;
+    Bridge< ExposedPriorityQueue<PyObject *> > *bridge;
     size_t maxsize;
     boost::uint64_t unfinished_tasks;
 } PriorityQueue;
@@ -139,7 +139,7 @@ Queue_init(Queue *self, PyObject *args, PyObject *kwargs)
     }
 
     BEGIN_SAFE_CALL
-        self->bridge = new Bridge<std::deque<PyObject *>>();
+        self->bridge = new Bridge< std::deque<PyObject *> >();
     END_SAFE_CALL("Error creating underlying queue: %s", -1)
     return 0;
 }
@@ -159,7 +159,7 @@ PriorityQueue_init(PriorityQueue *self, PyObject *args, PyObject *kwargs)
     }
 
     BEGIN_SAFE_CALL
-        self->bridge = new Bridge<ExposedPriorityQueue<PyObject *>>();
+        self->bridge = new Bridge< ExposedPriorityQueue<PyObject *> >();
     END_SAFE_CALL("Error creating underlying queue: %s", -1)
     return 0;
 }
@@ -298,14 +298,14 @@ _wait_for_lock(boost::mutex::scoped_lock& lock)
 }
 
 static void
-_blocked_wait_full(Bridge<std::deque<PyObject *>> * bridge, boost::mutex::scoped_lock& lock)
+_blocked_wait_full(Bridge<std::deque< PyObject *> > * bridge, boost::mutex::scoped_lock& lock)
 {
     AllowThreads raii_lock;
     bridge->full_cond.wait(lock);
 }
 
 static void
-_blocked_wait_full(Bridge<ExposedPriorityQueue<PyObject *>> * bridge, boost::mutex::scoped_lock& lock)
+_blocked_wait_full(Bridge<ExposedPriorityQueue< PyObject *> > * bridge, boost::mutex::scoped_lock& lock)
 {
     AllowThreads raii_lock;
     bridge->full_cond.wait(lock);
@@ -313,7 +313,7 @@ _blocked_wait_full(Bridge<ExposedPriorityQueue<PyObject *>> * bridge, boost::mut
 
 static bool
 _timed_wait_full(
-        Bridge<std::deque<PyObject *>> * bridge,
+        Bridge< std::deque<PyObject *> > * bridge,
         boost::mutex::scoped_lock& lock,
         boost::system_time& timeout)
 {
@@ -323,7 +323,7 @@ _timed_wait_full(
 
 static bool
 _timed_wait_full(
-        Bridge<ExposedPriorityQueue<PyObject *>> * bridge,
+        Bridge< ExposedPriorityQueue<PyObject *> > * bridge,
         boost::mutex::scoped_lock& lock,
         boost::system_time& timeout)
 {
@@ -686,14 +686,14 @@ PriorityQueue_put_many(PriorityQueue *self, PyObject *args, PyObject *kwargs)
 }
 
 static void
-_blocked_wait_empty(Bridge<std::deque<PyObject *>> * bridge, boost::mutex::scoped_lock& lock)
+_blocked_wait_empty(Bridge< std::deque<PyObject *> > * bridge, boost::mutex::scoped_lock& lock)
 {
     AllowThreads raii_lock;
     bridge->empty_cond.wait(lock);
 }
 
 static void
-_blocked_wait_empty(Bridge<ExposedPriorityQueue<PyObject *>> * bridge, boost::mutex::scoped_lock& lock)
+_blocked_wait_empty(Bridge< ExposedPriorityQueue<PyObject *> > * bridge, boost::mutex::scoped_lock& lock)
 {
     AllowThreads raii_lock;
     bridge->empty_cond.wait(lock);
@@ -701,7 +701,7 @@ _blocked_wait_empty(Bridge<ExposedPriorityQueue<PyObject *>> * bridge, boost::mu
 
 static bool
 _timed_wait_empty(
-        Bridge<std::deque<PyObject *>> * bridge,
+        Bridge< std::deque<PyObject *> > * bridge,
         boost::mutex::scoped_lock& lock,
         boost::system_time& timeout)
 {
@@ -711,7 +711,7 @@ _timed_wait_empty(
 
 static bool
 _timed_wait_empty(
-        Bridge<ExposedPriorityQueue<PyObject *>> * bridge,
+        Bridge< ExposedPriorityQueue<PyObject *> > * bridge,
         boost::mutex::scoped_lock& lock,
         boost::system_time& timeout)
 {
@@ -976,7 +976,7 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
         items = self->bridge->queue.size();
     }
 
-    if (self->maxsize > 0 and maxitems > self->maxsize) {
+    if (self->maxsize > 0 and static_cast<size_t>(maxitems) > self->maxsize) {
         // Restrict maxitems to max size if larger
         maxitems = self->maxsize;
     }
