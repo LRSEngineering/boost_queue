@@ -55,11 +55,11 @@ static PyObject * FullError;
 class PyTupleCompare {
     public:
     bool operator() (PyObject *a, PyObject *b) {
-        if (PyTuple_Check(a) and PyTuple_Check(b)) {
+        if (PyTuple_Check(a) and PyTuple_Check(b) and PyTuple_Size(a) > 1 and PyTuple_Size(b) > 1) {
             PyObject *a_priority = PyTuple_GetItem(a, 0);
             PyObject *b_priority = PyTuple_GetItem(b, 0);
 
-            if (a_priority != NULL and b_priority != NULL) {
+            if (a_priority != NULL and b_priority != NULL and PyInt_Check(a_priority) and PyInt_Check(b_priority)) {
                 return PyInt_AsLong(a_priority) > PyInt_AsLong(b_priority);
             }
         }
@@ -788,7 +788,6 @@ _wait_for_items(
         boost::system_time abs_timeout = boost::get_system_time();
         abs_timeout += boost::posix_time::milliseconds(timeout_millis);
         while (self->bridge->queue.size() < static_cast<size_t>(items_len)) {
-            std::cout << self->bridge->queue.size() << " " << items_len << std::endl;
             if (not _timed_wait_empty(self->bridge, lock, abs_timeout)) {
                 PyErr_Format(EmptyError, "PriorityQueue Empty");
                 return false;
@@ -843,11 +842,6 @@ _internal_get(PriorityQueue *self, bool block, double timeout)
     PyObject *item = self->bridge->queue.top();
     self->bridge->queue.pop();
     self->bridge->full_cond.notify_one();
-
-    if (PyTuple_Check(item) and PyTuple_Size(item) == 2) {
-        return PyTuple_GetItem(item, 1);
-    }
-
     return item;
 
     END_SAFE_CALL("Error in get: %s", NULL)
@@ -1091,13 +1085,7 @@ PriorityQueue_get_many(PriorityQueue *self, PyObject *args, PyObject *kwargs)
 
     for (long int i=0; i<items; i++) {
         PyObject *item = self->bridge->queue.top();
-
-        if (PyTuple_Check(item) and PyTuple_Size(item) == 2) {
-            PyObject *item_value = PyTuple_GetItem(item, 1);
-            PyTuple_SET_ITEM(result_tuple, i, item_value);
-        } else {
-            PyTuple_SET_ITEM(result_tuple, i, item);
-        }
+        PyTuple_SET_ITEM(result_tuple, i, item);
 
         self->bridge->queue.pop();
     }
