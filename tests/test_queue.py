@@ -1,13 +1,12 @@
 import time
 import threading
-from unittest2 import TestCase
+from unittest2 import TestCase, main
 
-from boost_queue import Queue
+from boost_queue import Queue, PriorityQueue
 from boost_queue import Full
 from boost_queue import Empty
 
 import Queue as std_queue
-
 
 class TestQueue(TestCase):
     def test_put(self):
@@ -155,13 +154,20 @@ class TestQueue(TestCase):
         self.assertEqual((2, 3), q.get_many(2))
 
     def test_get_many_with_item_limit(self):
-        q = Queue(10)
-        q.put_many((1, 2, 3))
-        q.put_many((1, 2, 3))
+        q = Queue()
+        def producer(q):
+            time.sleep(1)
+            q.put_many((1, 2, 3))
+            q.put_many((1, 2, 3))
+        
+        t = threading.Thread(target=producer, args=(q,))
+        t.start()
 
-        self.assertEqual((1, 2), q.get_many(-1, maxitems=2))
-        self.assertEqual((3,), q.get_many(-1, maxitems=1))
-        self.assertEqual((1, 2, 3), q.get_many(-1, maxitems=3))
+        self.assertEqual((1, 2), q.get_many(-1, maxitems=2, timeout=2))
+        self.assertEqual((3,), q.get_many(-1, maxitems=1, timeout=2))
+        self.assertEqual((1, 2, 3), q.get_many(-1, maxitems=3, timeout=2))
+
+        t.join()
 
     def test_get_many_not_enough_space(self):
         q = Queue(10)
@@ -171,3 +177,22 @@ class TestQueue(TestCase):
 
         with self.assertRaises(Empty):
             q.get_many(2, block=False)
+        
+    def test_priority_queue_sorting(self):
+        q = PriorityQueue()
+
+        def producer(q):
+            time.sleep(1)
+            q.put_many(((9, 1), (8, 2), (7, 3), (6, 4), (5, 5), (4, 6)))
+            q.put_many(((2, 7), (1, 8), (3, 9)))
+        
+        t = threading.Thread(target=producer, args=(q,))
+        t.start()
+
+        self.assertEqual((8, 7, 9, 6, 5, 4, 3, 2, 1), q.get_many(-1, timeout=2))
+
+        t.join()
+
+
+if __name__ == '__main__':
+    main()

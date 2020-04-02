@@ -7,7 +7,9 @@
 
 #include "Python.h"
 
+#include <iostream>
 #include <exception>
+#include <queue>
 #include <deque>
 #include <boost/cstdint.hpp>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
@@ -50,21 +52,52 @@ static const char *get_many_kwlist[] = {"items", "block", "timeout", "maxitems",
 static PyObject * EmptyError;
 static PyObject * FullError;
 
-class Bridge {
+class PyTupleCompare {
+    public:
+    bool operator() (PyObject *a, PyObject *b) {
+        if (PyTuple_Check(a) and PyTuple_Check(b)) {
+            PyObject *a_priority = PyTuple_GetItem(a, 0);
+            PyObject *b_priority = PyTuple_GetItem(b, 0);
+
+            if (a_priority != NULL and b_priority != NULL) {
+                return PyInt_AsLong(a_priority) > PyInt_AsLong(b_priority);
+            }
+        }
+
+        return false;
+    }
+};
+
+template<typename T,
+         typename Container = std::deque<T>,
+         typename Compare = PyTupleCompare>
+class ExposedPriorityQueue: public std::priority_queue<T,Container,Compare> {
+    public:
+        Container get_container() { return this->c; }
+};
+
+template <class Container> class Bridge {
     public:
         boost::mutex mutex;
         boost::condition_variable empty_cond;
         boost::condition_variable full_cond;
         boost::condition_variable all_tasks_done_cond;
-        std::deque<PyObject*> queue;
+        Container queue;
 };
 
 typedef struct {
     PyObject_HEAD
-    Bridge *bridge;
+    Bridge<std::deque<PyObject *>>*bridge;
     size_t maxsize;
     boost::uint64_t unfinished_tasks;
 } Queue;
+
+typedef struct {
+    PyObject_HEAD
+    Bridge<ExposedPriorityQueue<PyObject *>>*bridge;
+    size_t maxsize;
+    boost::uint64_t unfinished_tasks;
+} PriorityQueue;
 
 
 static PyObject *
@@ -72,6 +105,18 @@ Queue_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     Queue *self;
     self = reinterpret_cast<Queue*> (type->tp_alloc(type, 0));
+    self->bridge = NULL;
+    self->unfinished_tasks = 0;
+    self->maxsize = 0;
+
+    return reinterpret_cast<PyObject*>(self);
+}
+
+static PyObject *
+PriorityQueue_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PriorityQueue *self;
+    self = reinterpret_cast<PriorityQueue*> (type->tp_alloc(type, 0));
     self->bridge = NULL;
     self->unfinished_tasks = 0;
     self->maxsize = 0;
@@ -94,7 +139,27 @@ Queue_init(Queue *self, PyObject *args, PyObject *kwargs)
     }
 
     BEGIN_SAFE_CALL
-        self->bridge = new Bridge();
+        self->bridge = new Bridge<std::deque<PyObject *>>();
+    END_SAFE_CALL("Error creating underlying queue: %s", -1)
+    return 0;
+}
+
+static int
+PriorityQueue_init(PriorityQueue *self, PyObject *args, PyObject *kwargs)
+{
+    long int maxsize=0;
+    if(!PyArg_ParseTuple(args, "|l", &maxsize))
+        return -1;
+
+    if (maxsize < 0) {
+        self->maxsize = 0;
+    }
+    else {
+        self->maxsize = maxsize;
+    }
+
+    BEGIN_SAFE_CALL
+        self->bridge = new Bridge<ExposedPriorityQueue<PyObject *>>();
     END_SAFE_CALL("Error creating underlying queue: %s", -1)
     return 0;
 }
@@ -104,6 +169,17 @@ Queue_traverse(Queue *self, visitproc visit, void *arg)
 {
     BEGIN_SAFE_CALL
         BOOST_FOREACH(PyObject* entry, self->bridge->queue) {
+            Py_VISIT(entry);
+        }
+    END_SAFE_CALL("Error while traversing: %s", -1)
+    return 0;
+}
+
+static int
+PriorityQueue_traverse(PriorityQueue *self, visitproc visit, void *arg)
+{
+    BEGIN_SAFE_CALL
+        BOOST_FOREACH(PyObject* entry, self->bridge->queue.get_container()) {
             Py_VISIT(entry);
         }
     END_SAFE_CALL("Error while traversing: %s", -1)
@@ -121,6 +197,17 @@ Queue_clear(Queue *self)
     return 0;
 }
 
+static int
+PriorityQueue_clear(PriorityQueue *self)
+{
+    BEGIN_SAFE_CALL
+        BOOST_FOREACH(PyObject* entry, self->bridge->queue.get_container()) {
+            Py_CLEAR(entry);
+        }
+    END_SAFE_CALL("Error while clear: %s", -1)
+    return 0;
+}
+
 static void
 Queue_dealloc(Queue *self)
 {
@@ -131,6 +218,15 @@ Queue_dealloc(Queue *self)
     self->ob_type->tp_free(reinterpret_cast<PyObject*>(self));
 }
 
+static void
+PriorityQueue_dealloc(Queue *self)
+{
+    if (self->bridge) {
+        Queue_clear(self);
+        delete self->bridge;
+    }
+    self->ob_type->tp_free(reinterpret_cast<PyObject*>(self));
+}
 
 static int
 _parse_block_and_timeout_and_maxitems(
@@ -202,7 +298,14 @@ _wait_for_lock(boost::mutex::scoped_lock& lock)
 }
 
 static void
-_blocked_wait_full(Bridge* bridge, boost::mutex::scoped_lock& lock)
+_blocked_wait_full(Bridge<std::deque<PyObject *>> * bridge, boost::mutex::scoped_lock& lock)
+{
+    AllowThreads raii_lock;
+    bridge->full_cond.wait(lock);
+}
+
+static void
+_blocked_wait_full(Bridge<ExposedPriorityQueue<PyObject *>> * bridge, boost::mutex::scoped_lock& lock)
 {
     AllowThreads raii_lock;
     bridge->full_cond.wait(lock);
@@ -210,7 +313,17 @@ _blocked_wait_full(Bridge* bridge, boost::mutex::scoped_lock& lock)
 
 static bool
 _timed_wait_full(
-        Bridge* bridge,
+        Bridge<std::deque<PyObject *>> * bridge,
+        boost::mutex::scoped_lock& lock,
+        boost::system_time& timeout)
+{
+    AllowThreads raii_lock;
+    return bridge->full_cond.timed_wait(lock, timeout);
+}
+
+static bool
+_timed_wait_full(
+        Bridge<ExposedPriorityQueue<PyObject *>> * bridge,
         boost::mutex::scoped_lock& lock,
         boost::system_time& timeout)
 {
@@ -221,6 +334,44 @@ _timed_wait_full(
 static bool
 _wait_for_free_slots(
         Queue *self,
+        bool block,
+        double timeout,
+        boost::mutex::scoped_lock& lock,
+        size_t nb_of_items)
+{
+    boost::uint64_t timeout_millis = static_cast<boost::uint64_t>(timeout*1000);
+
+    if(self->maxsize == 0) {
+        /* Fall through the end of method */
+    }
+    else if((self->maxsize - self->bridge->queue.size()) >= nb_of_items) {
+        /* Fall through the end of method */
+    }
+    else if (not block) {
+        PyErr_Format(FullError, "Queue Full");
+        return false;
+    }
+    else if (timeout > 0) {
+        boost::system_time abs_timeout = boost::get_system_time();
+        abs_timeout += boost::posix_time::milliseconds(timeout_millis);
+        while (!((self->maxsize - self->bridge->queue.size()) >= nb_of_items)) {
+            if (not _timed_wait_full(self->bridge, lock, abs_timeout)) {
+                PyErr_Format(FullError, "Queue Full");
+                return false;
+            }
+        }
+    }
+    else {
+        while (!((self->maxsize - self->bridge->queue.size()) >= nb_of_items)) {
+            _blocked_wait_full(self->bridge, lock);
+        }
+    }
+    return true;
+}
+
+static bool
+_wait_for_free_slots(
+        PriorityQueue *self,
         bool block,
         double timeout,
         boost::mutex::scoped_lock& lock,
@@ -281,7 +432,60 @@ _internal_put(Queue *self, PyObject *item, bool block, double timeout)
 }
 
 static PyObject*
+_internal_put(PriorityQueue *self, PyObject *item, bool block, double timeout)
+{
+    BEGIN_SAFE_CALL
+
+    boost::mutex::scoped_lock lock(self->bridge->mutex, boost::try_to_lock);
+    if (not lock.owns_lock()) {
+        _wait_for_lock(lock);
+    }
+
+    if (not _wait_for_free_slots(self, block, timeout, lock, 1)) {
+        return NULL;
+    }
+
+    self->bridge->queue.push(item);
+    Py_INCREF(item);
+
+    self->unfinished_tasks += 1;
+    self->bridge->empty_cond.notify_one();
+
+    END_SAFE_CALL("Error in put: %s", NULL)
+    Py_RETURN_NONE;
+}
+
+static PyObject*
 Queue_put(Queue *self, PyObject *args, PyObject *kwargs)
+{
+    PyObject *item;
+
+    PyObject *py_block=NULL;
+    bool block=true;
+
+    PyObject *py_timeout=NULL;
+    double timeout = 0;
+    
+    if (not PyArg_ParseTupleAndKeywords(
+                                args,
+                                kwargs,
+                                "O|OO:put",
+                                const_cast<char**>(put_kwlist),
+                                &item,
+                                &py_block,
+                                &py_timeout))
+    {
+        return NULL;
+    }
+
+    if (_parse_block_and_timeout_and_maxitems(py_block, py_timeout, NULL, block, timeout, NULL) == -1) {
+        return NULL;
+    }
+    return _internal_put(self, item, block, timeout);
+}
+
+static PyObject*
+PriorityQueue_put(PriorityQueue *self, PyObject *args, PyObject *kwargs)
 {
     PyObject *item;
 
@@ -395,8 +599,101 @@ Queue_put_many(Queue *self, PyObject *args, PyObject *kwargs)
     Py_RETURN_NONE;
 }
 
+static PyObject*
+PriorityQueue_put_many(PriorityQueue *self, PyObject *args, PyObject *kwargs)
+{
+    PyObject *items;
+
+    PyObject *py_block=NULL;
+    bool block=true;
+
+    PyObject *py_timeout=NULL;
+    double timeout = 0;
+
+    PyObject *iterator=NULL;
+    PyObject *itertor_item=NULL;
+    Py_ssize_t items_len;
+
+    if (not PyArg_ParseTupleAndKeywords(
+                                args,
+                                kwargs,
+                                "O|OO:put",
+                                const_cast<char**>(put_many_kwlist),
+                                &items,
+                                &py_block,
+                                &py_timeout))
+    {
+        return NULL;
+    }
+
+    if (_parse_block_and_timeout_and_maxitems(py_block, py_timeout, NULL, block, timeout, NULL) == -1) {
+        return NULL;
+    }
+
+    if ((items_len = PyObject_Length(items)) == -1) {
+        return NULL;
+    }
+
+    if (items_len == 0) {
+        Py_RETURN_NONE;
+    }
+
+    /* Can happen if items is a custom object overloading __len__ */
+    if (items_len < 0) {
+        return PyErr_Format(
+                PyExc_ValueError,
+                "len of items is smaller 0: %i",
+                items_len);
+    }
+
+    if (self->maxsize > 0 and static_cast<size_t>(items_len) > self->maxsize) {
+        return PyErr_Format(
+                    PyExc_ValueError,
+                    "items of size %i is bigger than maxsize: %i",
+                    items_len,
+                    self->maxsize);
+    }
+
+    BEGIN_SAFE_CALL
+
+    boost::mutex::scoped_lock lock(self->bridge->mutex, boost::try_to_lock);
+    if (not lock.owns_lock()) {
+        _wait_for_lock(lock);
+    }
+
+    if (not _wait_for_free_slots(self, block, timeout, lock, static_cast<size_t>(items_len))) {
+        return NULL;
+    }
+
+    if ((iterator = PyObject_GetIter(items)) == NULL) {
+        return NULL;
+    }
+
+    while ((itertor_item = PyIter_Next(iterator))) {
+        self->bridge->queue.push(itertor_item);
+        self->unfinished_tasks += 1;
+
+    }
+    self->bridge->empty_cond.notify_all();
+    Py_DECREF(iterator);
+
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
+
+    END_SAFE_CALL("Error in put_many: %s", NULL)
+    Py_RETURN_NONE;
+}
+
 static void
-_blocked_wait_empty(Bridge* bridge, boost::mutex::scoped_lock& lock)
+_blocked_wait_empty(Bridge<std::deque<PyObject *>> * bridge, boost::mutex::scoped_lock& lock)
+{
+    AllowThreads raii_lock;
+    bridge->empty_cond.wait(lock);
+}
+
+static void
+_blocked_wait_empty(Bridge<ExposedPriorityQueue<PyObject *>> * bridge, boost::mutex::scoped_lock& lock)
 {
     AllowThreads raii_lock;
     bridge->empty_cond.wait(lock);
@@ -404,7 +701,17 @@ _blocked_wait_empty(Bridge* bridge, boost::mutex::scoped_lock& lock)
 
 static bool
 _timed_wait_empty(
-        Bridge* bridge,
+        Bridge<std::deque<PyObject *>> * bridge,
+        boost::mutex::scoped_lock& lock,
+        boost::system_time& timeout)
+{
+    AllowThreads raii_lock;
+    return bridge->empty_cond.timed_wait(lock, timeout);
+}
+
+static bool
+_timed_wait_empty(
+        Bridge<ExposedPriorityQueue<PyObject *>> * bridge,
         boost::mutex::scoped_lock& lock,
         boost::system_time& timeout)
 {
@@ -454,6 +761,49 @@ _wait_for_items(
     return true;
 }
 
+static bool
+_wait_for_items(
+        PriorityQueue *self,
+        bool block,
+        double timeout,
+        boost::mutex::scoped_lock& lock,
+        long int items_len)
+{
+    boost::uint64_t timeout_millis = static_cast<boost::uint64_t>(timeout*1000);
+
+    if (items_len < 0) {
+        // Anything negative means that we should grab any number of items
+        // that is available or in other words, at least 1.
+        items_len = 1;
+    }
+
+    if (self->bridge->queue.size() >= static_cast<size_t>(items_len)) {
+        /* Fall through the end of method */
+    }
+    else if (not block) {
+        PyErr_Format(EmptyError, "PriorityQueue Empty");
+        return false;
+    }
+    else if (timeout > 0) {
+        boost::system_time abs_timeout = boost::get_system_time();
+        abs_timeout += boost::posix_time::milliseconds(timeout_millis);
+        while (self->bridge->queue.size() < static_cast<size_t>(items_len)) {
+            std::cout << self->bridge->queue.size() << " " << items_len << std::endl;
+            if (not _timed_wait_empty(self->bridge, lock, abs_timeout)) {
+                PyErr_Format(EmptyError, "PriorityQueue Empty");
+                return false;
+            }
+        }
+    }
+    else {
+        // Wait indefinitely...
+        while (self->bridge->queue.size() < static_cast<size_t>(items_len)) {
+            _blocked_wait_empty(self->bridge, lock);
+        }
+    }
+    return true;
+}
+
 static PyObject*
 _internal_get(Queue *self, bool block, double timeout)
 {
@@ -477,7 +827,61 @@ _internal_get(Queue *self, bool block, double timeout)
 }
 
 static PyObject*
+_internal_get(PriorityQueue *self, bool block, double timeout)
+{
+    BEGIN_SAFE_CALL
+
+    boost::mutex::scoped_lock lock(self->bridge->mutex, boost::try_to_lock);
+    if (not lock.owns_lock()) {
+        _wait_for_lock(lock);
+    }
+
+    if (not _wait_for_items(self, block, timeout, lock, 1)) {
+        return NULL;
+    }
+
+    PyObject *item = self->bridge->queue.top();
+    self->bridge->queue.pop();
+    self->bridge->full_cond.notify_one();
+
+    if (PyTuple_Check(item) and PyTuple_Size(item) == 2) {
+        return PyTuple_GetItem(item, 1);
+    }
+
+    return item;
+
+    END_SAFE_CALL("Error in get: %s", NULL)
+}
+
+static PyObject*
 Queue_get(Queue *self, PyObject *args, PyObject *kwargs)
+{
+
+    PyObject *py_block=NULL;
+    PyObject *py_timeout=NULL;
+
+    bool block=true;
+    double timeout = 0;
+    
+    if(not PyArg_ParseTupleAndKeywords(
+                                args,
+                                kwargs,
+                                "|OO:get",
+                                const_cast<char**>(get_kwlist),
+                                &py_block,
+                                &py_timeout))
+    {
+        return NULL;
+    }
+
+    if (_parse_block_and_timeout_and_maxitems(py_block, py_timeout, NULL, block, timeout, NULL) == -1) {
+        return NULL;
+    }
+    return _internal_get(self, block, timeout);
+}
+
+static PyObject*
+PriorityQueue_get(PriorityQueue *self, PyObject *args, PyObject *kwargs)
 {
 
     PyObject *py_block=NULL;
@@ -602,7 +1006,117 @@ Queue_get_many(Queue *self, PyObject *args, PyObject *kwargs)
 }
 
 static PyObject*
+PriorityQueue_get_many(PriorityQueue *self, PyObject *args, PyObject *kwargs)
+{
+
+    PyObject *py_block=NULL;
+    PyObject *py_timeout=NULL;
+    PyObject *py_maxitems=NULL;
+    PyObject *result_tuple=NULL;
+
+    bool block=true;
+    double timeout = 0;
+    long int maxitems = 0;
+    long int items = 0;
+
+    if(not PyArg_ParseTupleAndKeywords(
+                                args,
+                                kwargs,
+                                "l|OOO:get",
+                                const_cast<char**>(get_many_kwlist),
+                                &items,
+                                &py_block,
+                                &py_timeout,
+                                &py_maxitems))
+    {
+        return NULL;
+    }
+
+    if (_parse_block_and_timeout_and_maxitems(py_block, py_timeout, py_maxitems, block, timeout, &maxitems) == -1) {
+        return NULL;
+    }
+
+    if (items == 0) {
+        return PyTuple_New(0);
+    }
+
+#if 0
+    if (items < 0) {
+        return PyErr_Format(
+                PyExc_ValueError,
+                "items must be greater or equal 0 but it is: %ld",
+                items);
+    }
+#endif
+
+
+    if (self->maxsize > 0 and items > static_cast<long>(self->maxsize)) {
+        return PyErr_Format(
+                PyExc_ValueError,
+                "you want to get %ld but maxsize is %i",
+                items,
+                self->maxsize);
+    }
+
+    BEGIN_SAFE_CALL
+
+    boost::mutex::scoped_lock lock(self->bridge->mutex, boost::try_to_lock);
+    if (not lock.owns_lock()) {
+        _wait_for_lock(lock);
+    }
+
+    if (not _wait_for_items(self, block, timeout, lock, items)) {
+        return NULL;
+    }
+
+    if (items < 0) {
+        // Negative items means we grab as many items as available.
+        items = self->bridge->queue.size();
+    }
+
+    if (self->maxsize > 0 and maxitems > self->maxsize) {
+        // Restrict maxitems to max size if larger
+        maxitems = self->maxsize;
+    }
+
+    if (maxitems > 0 and items > maxitems) {
+        // Max items supercedes item count passed,
+        // so limit the item count.
+        items = maxitems;
+    }
+
+    if ((result_tuple = PyTuple_New(items)) == NULL) {
+        return NULL;
+    }
+
+    for (long int i=0; i<items; i++) {
+        PyObject *item = self->bridge->queue.top();
+
+        if (PyTuple_Check(item) and PyTuple_Size(item) == 2) {
+            PyObject *item_value = PyTuple_GetItem(item, 1);
+            PyTuple_SET_ITEM(result_tuple, i, item_value);
+        } else {
+            PyTuple_SET_ITEM(result_tuple, i, item);
+        }
+
+        self->bridge->queue.pop();
+    }
+
+    self->bridge->full_cond.notify_all();
+    return result_tuple;
+
+
+    END_SAFE_CALL("Error in get_many: %s", NULL)
+}
+
+static PyObject*
 Queue_qsize(Queue *self)
+{
+    return PyLong_FromSize_t(self->bridge->queue.size());
+}
+
+static PyObject*
+PriorityQueue_qsize(PriorityQueue *self)
 {
     return PyLong_FromSize_t(self->bridge->queue.size());
 }
@@ -617,7 +1131,30 @@ Queue_empty(Queue *self)
 }
 
 static PyObject*
+PriorityQueue_empty(PriorityQueue *self)
+{
+    if (self->bridge->queue.size() == 0) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+
+static PyObject*
 Queue_full(Queue *self)
+{
+    if (self->maxsize == 0) {
+        Py_RETURN_FALSE;
+    }
+
+    if (self->bridge->queue.size() < self->maxsize) {
+        Py_RETURN_FALSE;
+    }
+    Py_RETURN_TRUE;
+}
+
+static PyObject*
+PriorityQueue_full(PriorityQueue *self)
 {
     if (self->maxsize == 0) {
         Py_RETURN_FALSE;
@@ -636,13 +1173,48 @@ Queue_put_nowait(Queue *self, PyObject *item)
 }
 
 static PyObject*
+PriorityQueue_put_nowait(PriorityQueue *self, PyObject *item)
+{
+    return _internal_put(self, item, false, 0);
+}
+
+static PyObject*
 Queue_get_nowait(Queue *self)
 {
     return _internal_get(self, false, 0);
 }
 
 static PyObject*
+PriorityQueue_get_nowait(PriorityQueue *self)
+{
+    return _internal_get(self, false, 0);
+}
+
+static PyObject*
 Queue_task_done(Queue *self)
+{
+    BEGIN_SAFE_CALL
+
+    boost::mutex::scoped_lock lock(self->bridge->mutex, boost::try_to_lock);
+    if (not lock.owns_lock()) {
+        _wait_for_lock(lock);
+    }
+
+    if (self->unfinished_tasks == 0) {
+        return PyErr_Format(
+                    PyExc_ValueError, "task_done() called too many times");
+    }
+
+    if (--self->unfinished_tasks == 0) {
+        self->bridge->all_tasks_done_cond.notify_all();
+    }
+
+    END_SAFE_CALL("Error in task_done: %s", NULL)
+    Py_RETURN_NONE;
+}
+
+static PyObject*
+PriorityQueue_task_done(PriorityQueue *self)
 {
     BEGIN_SAFE_CALL
 
@@ -671,8 +1243,33 @@ _blocked_wait_all_tasks_done(Queue* self, boost::mutex::scoped_lock& lock)
     self->bridge->all_tasks_done_cond.wait(lock);
 }
 
+static void
+_blocked_wait_all_tasks_done(PriorityQueue* self, boost::mutex::scoped_lock& lock)
+{
+    AllowThreads raii_lock;
+    self->bridge->all_tasks_done_cond.wait(lock);
+}
+
 static PyObject*
 Queue_join(Queue* self)
+{
+    BEGIN_SAFE_CALL
+
+    boost::mutex::scoped_lock lock(self->bridge->mutex, boost::try_to_lock);
+    if (not lock.owns_lock()) {
+        _wait_for_lock(lock);
+    }
+
+    while (self->unfinished_tasks) {
+        _blocked_wait_all_tasks_done(self, lock);
+    }
+
+    END_SAFE_CALL("Error in join: %s", NULL)
+    Py_RETURN_NONE;
+}
+
+static PyObject*
+PriorityQueue_join(PriorityQueue* self)
 {
     BEGIN_SAFE_CALL
 
@@ -704,14 +1301,40 @@ static PyMethodDef Queue_methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
+static PyMethodDef PriorityQueue_methods[] = {
+    {"put", (PyCFunction)PriorityQueue_put, METH_VARARGS|METH_KEYWORDS, ""},
+    {"get", (PyCFunction)PriorityQueue_get, METH_VARARGS|METH_KEYWORDS, ""},
+    {"qsize", (PyCFunction)PriorityQueue_qsize, METH_NOARGS, ""},
+    {"empty", (PyCFunction)PriorityQueue_empty, METH_NOARGS, ""},
+    {"full", (PyCFunction)PriorityQueue_full, METH_NOARGS, ""},
+    {"put_nowait", (PyCFunction)PriorityQueue_put_nowait, METH_O, ""},
+    {"get_nowait", (PyCFunction)PriorityQueue_get_nowait, METH_NOARGS, ""},
+    {"put_many", (PyCFunction)PriorityQueue_put_many, METH_VARARGS|METH_KEYWORDS, ""},
+    {"get_many", (PyCFunction)PriorityQueue_get_many, METH_VARARGS|METH_KEYWORDS, ""},
+    {"task_done", (PyCFunction)PriorityQueue_task_done, METH_NOARGS, ""},
+    {"join", (PyCFunction)PriorityQueue_join, METH_NOARGS, ""},
+    {NULL, NULL, 0, NULL}
+};
+
 static PyObject *
 Queue_maxsize_get(Queue *self, void *closure)
 {
     return PyLong_FromSize_t(self->maxsize);
 }
 
+static PyObject *
+PriorityQueue_maxsize_get(PriorityQueue *self, void *closure)
+{
+    return PyLong_FromSize_t(self->maxsize);
+}
+
 static PyGetSetDef Queue_getsets[] = {
     {const_cast<char*>("maxsize"), (getter)Queue_maxsize_get, NULL, const_cast<char*>(""), NULL},
+    {NULL, NULL, NULL, NULL, NULL}
+};
+
+static PyGetSetDef PriorityQueue_getsets[] = {
+    {const_cast<char*>("maxsize"), (getter)PriorityQueue_maxsize_get, NULL, const_cast<char*>(""), NULL},
     {NULL, NULL, NULL, NULL, NULL}
 };
 
@@ -757,6 +1380,48 @@ static PyTypeObject QueueType = {
     Queue_new,                 /* tp_new */
 };
 
+static PyTypeObject PriorityQueueType = {
+    PyObject_HEAD_INIT(NULL)
+    0,                         /*ob_size*/
+    "boost_queue.PriorityQueue",       /*tp_name*/
+    sizeof(PriorityQueue),             /*tp_basicsize*/
+    0,                         /*tp_itemsize*/
+    (destructor)PriorityQueue_dealloc, /*tp_dealloc*/
+    0,                         /*tp_print*/
+    0,                         /*tp_getattr*/
+    0,                         /*tp_setattr*/
+    0,                         /*tp_compare*/
+    0,                         /*tp_repr*/
+    0,                         /*tp_as_number*/
+    0,                         /*tp_as_sequence*/
+    0,                         /*tp_as_mapping*/
+    0,                         /*tp_hash */
+    0,                         /*tp_call*/
+    0,                         /*tp_str*/
+    0,                         /*tp_getattro*/
+    0,                         /*tp_setattro*/
+    0,                         /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,/*tp_flags*/
+    "",                        /* tp_doc */
+    (traverseproc)PriorityQueue_traverse,   /* tp_traverse */
+    (inquiry)PriorityQueue_clear,           /* tp_clear */
+    0,                         /* tp_richcompare */
+    0,                         /* tp_weaklistoffset */
+    0,                         /* tp_iter */
+    0,                         /* tp_iternext */
+    PriorityQueue_methods,             /* tp_methods */
+    0,                         /* tp_members */
+    PriorityQueue_getsets,             /* tp_getset */
+    0,                         /* tp_base */
+    0,                         /* tp_dict */
+    0,                         /* tp_descr_get */
+    0,                         /* tp_descr_set */
+    0,                         /* tp_dictoffset */
+    (initproc)PriorityQueue_init,      /* tp_init */
+    0,                         /* tp_alloc */
+    PriorityQueue_new,                 /* tp_new */
+};
+
 PyMODINIT_FUNC
 initboost_queue(void){
     PyObject* module;
@@ -765,6 +1430,10 @@ initboost_queue(void){
     PyObject* std_full;
 
     if (PyType_Ready(&QueueType) < 0) {
+        return;
+    }
+
+    if (PyType_Ready(&PriorityQueueType) < 0) {
         return;
     }
 
@@ -805,5 +1474,7 @@ initboost_queue(void){
     PyModule_AddObject(module, "Full", FullError);
 
     Py_INCREF((PyObject*) &QueueType);
+    Py_INCREF((PyObject*) &PriorityQueueType);
     PyModule_AddObject(module, "Queue", (PyObject*)&QueueType);
+    PyModule_AddObject(module, "PriorityQueue", (PyObject*)&PriorityQueueType);
 }

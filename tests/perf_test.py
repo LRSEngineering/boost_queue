@@ -1,5 +1,5 @@
-from boost_queue import Queue
-#from Queue import Queue
+from boost_queue import PriorityQueue as Queue
+# from Queue import PriorityQueue as Queue
 import time
 import threading
 
