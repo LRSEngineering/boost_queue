@@ -55,12 +55,32 @@ static PyObject * FullError;
 class PyTupleCompare {
     public:
     bool operator() (PyObject *a, PyObject *b) {
-        if (PyTuple_Check(a) and PyTuple_Check(b) and PyTuple_Size(a) > 1 and PyTuple_Size(b) > 1) {
-            PyObject *a_priority = PyTuple_GetItem(a, 0);
-            PyObject *b_priority = PyTuple_GetItem(b, 0);
+        if (PyTuple_Check(a) and PyTuple_Check(b) ) {
+            Py_ssize_t a_size = PyTuple_Size(a);
+            Py_ssize_t b_size = PyTuple_Size(b);
 
-            if (a_priority != NULL and b_priority != NULL and PyInt_Check(a_priority) and PyInt_Check(b_priority)) {
-                return PyInt_AsLong(a_priority) > PyInt_AsLong(b_priority);
+            if (a_size > 1 and b_size > 1) {
+                PyObject *a_priority = PyTuple_GetItem(a, 0);
+                PyObject *b_priority = PyTuple_GetItem(b, 0);
+
+                if (a_priority != NULL and b_priority != NULL and PyInt_Check(a_priority) and PyInt_Check(b_priority)) {
+                    long a_priority_long = PyInt_AsLong(a_priority);
+                    long b_priority_long = PyInt_AsLong(b_priority);
+
+                    if (a_priority_long == b_priority_long and a_size > 2 and b_size > 2) {
+                        PyObject *a_order = PyTuple_GetItem(a, 1);
+                        PyObject *b_order = PyTuple_GetItem(b, 1);
+
+                        if (a_order != NULL and b_order != NULL and PyInt_Check(a_order) and PyInt_Check(b_order)) {
+                            long a_order_long = PyInt_AsLong(a_order);
+                            long b_order_long = PyInt_AsLong(b_order);
+
+                            return a_order_long > b_order_long;
+                        }
+                    }
+
+                    return a_priority_long > b_priority_long;
+                }
             }
         }
 

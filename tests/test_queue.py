@@ -183,14 +183,14 @@ class TestQueue(TestCase):
 
         def producer(q):
             time.sleep(1)
-            q.put((3, 8))
+            q.put((3, 2, 8))
             q.put_many(((9, 1), (8, 2), (7, 3), (6, 4), (5, 5), (4, 6)))
-            q.put_many(((2, 7), (1, 8), (3, 9)))
+            q.put_many(((2, 7), (1, 8), (3, 1, 9)))
         
         t = threading.Thread(target=producer, args=(q,))
         t.start()
 
-        self.assertEqual(((1, 8), (2, 7), (3, 9), (3, 8), (4, 6), (5, 5), (6, 4), (7, 3), (8, 2), (9, 1)), q.get_many(-1, timeout=2))
+        self.assertEqual(((1, 8), (2, 7), (3, 1, 9), (3, 2, 8), (4, 6), (5, 5), (6, 4), (7, 3), (8, 2), (9, 1)), q.get_many(-1, timeout=2))
 
         t.join()
     
